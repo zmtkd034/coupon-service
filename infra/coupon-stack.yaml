@@ -1,0 +1,396 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Coupon PoC - VPC(Public 2 / Private 2, NAT 1), ALB, Frontend/Backend EC2,
+  RDS PostgreSQL (Single-AZ), ElastiCache Valkey (1 node).
+  사전 준비: SSM Parameter Store 에 DB 암호를 SecureString 으로 만든다 (기본 /coupon/db/password).
+  삭제: 스택 삭제 시 RDS 스냅샷 없이 모두 지워진다.
+
+Parameters:
+  DbPasswordParam:
+    Type: String
+    Default: /coupon/db/password
+    Description: DB 마스터 암호가 든 SSM SecureString 이름 (RDS 와 Backend 가 같이 사용)
+  RepoUrl:
+    Type: String
+    Default: https://github.com/zmtkd034/coupon-service.git
+  RepoBranch:
+    Type: String
+    Default: main
+  InstanceType:
+    Type: String
+    Default: t3.small
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  InitialQty:
+    Type: Number
+    Default: 100
+    Description: 최초 쿠폰 재고 (reset.sql 의 qty)
+
+Resources:
+  # ---------- Network ----------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: coupon-vpc }]
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: coupon-igw }]
+
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref Igw }
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: coupon-public-a }]
+
+  PublicSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: coupon-public-c }]
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: coupon-private-a }]
+
+  PrivateSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: coupon-private-c }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: coupon-public-rt }]
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+
+  PublicSubnetARta:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnetA, RouteTableId: !Ref PublicRouteTable }
+
+  PublicSubnetCRta:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnetC, RouteTableId: !Ref PublicRouteTable }
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    DependsOn: IgwAttach
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: coupon-nat-eip }]
+
+  NatGw:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: [{ Key: Name, Value: coupon-nat }]
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: coupon-private-rt }]
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGw
+
+  PrivateSubnetARta:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnetA, RouteTableId: !Ref PrivateRouteTable }
+
+  PrivateSubnetCRta:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnetC, RouteTableId: !Ref PrivateRouteTable }
+
+  # ---------- Security Groups ----------
+  SgAlb:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sg-alb
+      GroupDescription: ALB - HTTP from internet
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+
+  SgWeb:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sg-web
+      GroupDescription: Frontend nginx - HTTP from ALB only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, SourceSecurityGroupId: !Ref SgAlb }
+
+  SgApi:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sg-api
+      GroupDescription: Backend API - 8000 from ALB only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 8000, ToPort: 8000, SourceSecurityGroupId: !Ref SgAlb }
+
+  SgDb:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sg-db
+      GroupDescription: RDS PostgreSQL - 5432 from API only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref SgApi }
+
+  SgCache:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sg-cache
+      GroupDescription: ElastiCache Valkey - 6379 from API only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 6379, ToPort: 6379, SourceSecurityGroupId: !Ref SgApi }
+
+  # ---------- IAM (SSM 접속 + DB 암호 조회) ----------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: read-db-password
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbPasswordParam}
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # ---------- Data ----------
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: coupon private subnets
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetC]
+
+  Db:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: coupon-db
+      Engine: postgres
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      MultiAZ: false
+      DBName: coupon
+      MasterUsername: coupon
+      MasterUserPassword: !Sub "{{resolve:ssm-secure:${DbPasswordParam}}}"
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref SgDb]
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: coupon private subnets
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetC]
+
+  Cache:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: coupon-cache
+      ReplicationGroupDescription: coupon stock cache
+      Engine: valkey
+      EngineVersion: "8.0"
+      CacheNodeType: cache.t4g.micro
+      NumCacheClusters: 1
+      AutomaticFailoverEnabled: false
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      SecurityGroupIds: [!Ref SgCache]
+      TransitEncryptionEnabled: true
+      AtRestEncryptionEnabled: true
+
+  # ---------- Servers ----------
+  BackendInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: [PrivateDefaultRoute, PrivateSubnetARta]
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PrivateSubnetA
+      SecurityGroupIds: [!Ref SgApi]
+      Tags: [{ Key: Name, Value: coupon-backend }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # 로그: /var/log/coupon-init.log
+          exec > /var/log/coupon-init.log 2>&1
+          set -euxo pipefail
+          dnf install -y git postgresql15
+          git clone --depth 1 --branch ${RepoBranch} ${RepoUrl} /opt/src
+
+          mkdir -p /etc/coupon
+          cat > /etc/coupon/backend.env <<EOF
+          AWS_REGION=${AWS::Region}
+          DB_HOST=${Db.Endpoint.Address}
+          DB_PORT=5432
+          DB_NAME=coupon
+          DB_USER=coupon
+          DB_PASSWORD_SSM_PARAM=${DbPasswordParam}
+          DB_SSLMODE=require
+          REDIS_HOST=${Cache.PrimaryEndPoint.Address}
+          REDIS_PORT=6379
+          REDIS_TLS=true
+          CACHE_ENABLED=true
+          CACHE_TTL_SECONDS=3
+          EOF
+
+          export PGPASSWORD="$(aws ssm get-parameter --region ${AWS::Region} --name ${DbPasswordParam} --with-decryption --query Parameter.Value --output text)"
+          DSN="host=${Db.Endpoint.Address} user=coupon dbname=coupon sslmode=require"
+          psql "$DSN" -v ON_ERROR_STOP=1 -f /opt/src/scripts/schema.sql
+          psql "$DSN" -v ON_ERROR_STOP=1 -v qty=${InitialQty} -f /opt/src/scripts/reset.sql
+          unset PGPASSWORD
+
+          bash /opt/src/scripts/setup_backend.sh
+          echo COUPON_INIT_DONE
+
+  FrontendInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: [PublicDefaultRoute, PublicSubnetARta]
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      NetworkInterfaces:
+        # 패키지 설치용 아웃바운드에 Public IP 필요. 인바운드는 sg-web 이 ALB 만 허용한다.
+        - DeviceIndex: "0"
+          SubnetId: !Ref PublicSubnetA
+          AssociatePublicIpAddress: true
+          GroupSet: [!Ref SgWeb]
+      Tags: [{ Key: Name, Value: coupon-frontend }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/coupon-init.log 2>&1
+          set -euxo pipefail
+          dnf install -y git
+          git clone --depth 1 --branch ${RepoBranch} ${RepoUrl} /opt/src
+          bash /opt/src/scripts/setup_frontend.sh
+          echo COUPON_INIT_DONE
+
+  # ---------- ALB ----------
+  TgWeb:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-coupon-web
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      Targets: [{ Id: !Ref FrontendInstance, Port: 80 }]
+
+  TgApi:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-coupon-api
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 8000
+      TargetType: instance
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      Targets: [{ Id: !Ref BackendInstance, Port: 8000 }]
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: IgwAttach
+    Properties:
+      Name: coupon-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetC]
+      SecurityGroups: [!Ref SgAlb]
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - { Type: forward, TargetGroupArn: !Ref TgWeb }
+
+  ApiRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 10
+      Conditions:
+        - { Field: path-pattern, PathPatternConfig: { Values: ["/api/*"] } }
+      Actions:
+        - { Type: forward, TargetGroupArn: !Ref TgApi }
+
+Outputs:
+  AppUrl:
+    Description: 브라우저로 접속할 주소
+    Value: !Sub http://${Alb.DNSName}
+  DbEndpoint:
+    Value: !GetAtt Db.Endpoint.Address
+  CacheEndpoint:
+    Value: !GetAtt Cache.PrimaryEndPoint.Address
+  BackendInstanceId:
+    Description: Session Manager 접속용 (로그 /var/log/coupon-init.log)
+    Value: !Ref BackendInstance
+  FrontendInstanceId:
+    Value: !Ref FrontendInstance
