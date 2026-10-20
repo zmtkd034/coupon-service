@@ -2,14 +2,14 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Coupon PoC - VPC(Public 2 / Private 2, NAT 1), ALB, Frontend/Backend EC2,
   RDS PostgreSQL (Single-AZ), ElastiCache Valkey (1 node).
-  사전 준비: SSM Parameter Store 에 DB 암호를 SecureString 으로 만든다 (기본 /coupon/db/password).
-  삭제: 스택 삭제 시 RDS 스냅샷 없이 모두 지워진다.
+  Prerequisite: create the DB password as an SSM SecureString (default /coupon/db/password).
+  Deleting the stack removes everything, including RDS (no final snapshot).
 
 Parameters:
   DbPasswordParam:
     Type: String
     Default: /coupon/db/password
-    Description: DB 마스터 암호가 든 SSM SecureString 이름 (RDS 와 Backend 가 같이 사용)
+    Description: SSM SecureString name holding the DB master password (shared by RDS and Backend)
   RepoUrl:
     Type: String
     Default: https://github.com/zmtkd034/coupon-service.git
@@ -25,7 +25,7 @@ Parameters:
   InitialQty:
     Type: Number
     Default: 100
-    Description: 최초 쿠폰 재고 (reset.sql 의 qty)
+    Description: Initial coupon stock (qty for reset.sql)
 
 Resources:
   # ---------- Network ----------
@@ -139,7 +139,7 @@ Resources:
   SgAlb:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: sg-alb
+      GroupName: coupon-alb-sg
       GroupDescription: ALB - HTTP from internet
       VpcId: !Ref Vpc
       SecurityGroupIngress:
@@ -148,7 +148,7 @@ Resources:
   SgWeb:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: sg-web
+      GroupName: coupon-web-sg
       GroupDescription: Frontend nginx - HTTP from ALB only
       VpcId: !Ref Vpc
       SecurityGroupIngress:
@@ -157,7 +157,7 @@ Resources:
   SgApi:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: sg-api
+      GroupName: coupon-api-sg
       GroupDescription: Backend API - 8000 from ALB only
       VpcId: !Ref Vpc
       SecurityGroupIngress:
@@ -166,7 +166,7 @@ Resources:
   SgDb:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: sg-db
+      GroupName: coupon-db-sg
       GroupDescription: RDS PostgreSQL - 5432 from API only
       VpcId: !Ref Vpc
       SecurityGroupIngress:
@@ -175,13 +175,13 @@ Resources:
   SgCache:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: sg-cache
+      GroupName: coupon-cache-sg
       GroupDescription: ElastiCache Valkey - 6379 from API only
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 6379, ToPort: 6379, SourceSecurityGroupId: !Ref SgApi }
 
-  # ---------- IAM (SSM 접속 + DB 암호 조회) ----------
+  # ---------- IAM (SSM Session Manager + read DB password) ----------
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -270,7 +270,7 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          # 로그: /var/log/coupon-init.log
+          # log: /var/log/coupon-init.log
           exec > /var/log/coupon-init.log 2>&1
           set -euxo pipefail
           dnf install -y git postgresql15
@@ -309,7 +309,7 @@ Resources:
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref InstanceProfile
       NetworkInterfaces:
-        # 패키지 설치용 아웃바운드에 Public IP 필요. 인바운드는 sg-web 이 ALB 만 허용한다.
+        # Public IP for outbound package installs; inbound is limited to the ALB by the web SG.
         - DeviceIndex: "0"
           SubnetId: !Ref PublicSubnetA
           AssociatePublicIpAddress: true
@@ -383,14 +383,14 @@ Resources:
 
 Outputs:
   AppUrl:
-    Description: 브라우저로 접속할 주소
+    Description: Open this URL in a browser
     Value: !Sub http://${Alb.DNSName}
   DbEndpoint:
     Value: !GetAtt Db.Endpoint.Address
   CacheEndpoint:
     Value: !GetAtt Cache.PrimaryEndPoint.Address
   BackendInstanceId:
-    Description: Session Manager 접속용 (로그 /var/log/coupon-init.log)
+    Description: For Session Manager (log at /var/log/coupon-init.log)
     Value: !Ref BackendInstance
   FrontendInstanceId:
     Value: !Ref FrontendInstance
