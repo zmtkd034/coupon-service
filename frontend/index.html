@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>선착순 쿠폰 발급</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="card">
+    <h1>선착순 쿠폰 발급</h1>
+    <p class="sub">교육용 PoC · 로그인 없이 가상 userId 사용</p>
+
+    <section class="stock">
+      <span class="label">남은 쿠폰</span>
+      <strong id="remaining">-</strong>
+      <span id="source" class="badge"></span>
+    </section>
+
+    <form id="issue-form" autocomplete="off">
+      <label for="userId">사용자 ID</label>
+      <input id="userId" name="userId" maxlength="64" pattern="[A-Za-z0-9_\-]{1,64}"
+             placeholder="예: user-1001" required>
+      <button type="submit" id="issue-btn">쿠폰 받기</button>
+    </form>
+
+    <p id="message" role="status" aria-live="polite"></p>
+
+    <section>
+      <h2>내 발급 내역</h2>
+      <button type="button" id="refresh-coupons" class="secondary">내역 조회</button>
+      <ul id="coupons"></ul>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

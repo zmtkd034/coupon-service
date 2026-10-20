@@ -1,0 +1,25 @@
+:root { --bg:#f4f6f9; --fg:#1b2a41; --card:#fff; --accent:#0e7c86; --ok:#1a7f37; --warn:#9a6700; --err:#c62828; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#10151c; --fg:#e6ebf2; --card:#1a222d; --accent:#3cc4cf; --ok:#4ac26b; --warn:#e3b341; --err:#ff7b72; }
+}
+* { box-sizing: border-box; }
+body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+       font-family:-apple-system,"Noto Sans KR",system-ui,sans-serif; }
+.card { max-width:480px; margin:32px auto; padding:24px; background:var(--card); border-radius:12px;
+        box-shadow:0 2px 12px rgba(0,0,0,.08); }
+h1 { margin:0 0 4px; font-size:1.5rem; }
+h2 { font-size:1.05rem; margin:24px 0 8px; }
+.sub { margin:0 0 20px; opacity:.7; font-size:.9rem; }
+.stock { display:flex; align-items:baseline; gap:12px; margin-bottom:20px; }
+.stock strong { font-size:2.5rem; color:var(--accent); }
+.badge { font-size:.75rem; opacity:.7; }
+label { display:block; margin-bottom:6px; font-weight:600; font-size:.9rem; }
+input { width:100%; padding:10px 12px; font-size:1rem; border:1px solid #8886; border-radius:8px;
+        background:transparent; color:inherit; }
+button { margin-top:12px; width:100%; padding:12px; font-size:1rem; font-weight:600; border:0;
+         border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+button.secondary { background:transparent; color:var(--accent); border:1px solid var(--accent); margin-top:0; }
+button:disabled { opacity:.5; cursor:wait; }
+#message { min-height:1.4em; font-weight:600; }
+#message.ok { color:var(--ok); } #message.warn { color:var(--warn); } #message.error { color:var(--err); }
+ul { padding-left:18px; }
