@@ -25,7 +25,7 @@ class Settings:
         self.db_user = os.getenv("DB_USER", "coupon")
         self.db_password = _db_password()
         self.db_sslmode = os.getenv("DB_SSLMODE", "prefer")
-        self.db_pool_max = int(os.getenv("DB_POOL_MAX", "20"))
+        self.db_pool_max = int(os.getenv("DB_POOL_MAX", "10"))
 
         self.cache_enabled = _bool("CACHE_ENABLED", True)
         self.redis_host = os.getenv("REDIS_HOST", "localhost")
